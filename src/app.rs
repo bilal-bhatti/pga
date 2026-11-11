@@ -7,49 +7,53 @@ use crate::catalog::{self, Access, Local, Role, Server, Shared, grantees, system
 use crate::conn::{self, Conn};
 use crate::wizard::{Action, Ctx, Flow, Next, Outcome, StepKind, Target, Wizard};
 
+/// A list in the left pane. Which ones a place offers is `Level::tabs`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Roles,
     Databases,
+    Settings,
+    Access,
+    Memberships,
     Schemas,
     Objects,
     Defaults,
     Rls,
-    Settings,
-    Access,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] =
-        [Tab::Roles, Tab::Databases, Tab::Schemas, Tab::Objects, Tab::Defaults, Tab::Rls, Tab::Settings, Tab::Access];
-
     pub fn title(self) -> &'static str {
         match self {
             Tab::Roles => "Roles",
             Tab::Databases => "Databases",
+            Tab::Settings => "Settings",
+            Tab::Access => "Access",
+            Tab::Memberships => "Memberships",
             Tab::Schemas => "Schemas",
             Tab::Objects => "Objects",
             Tab::Defaults => "Default privs",
             Tab::Rls => "RLS",
-            Tab::Settings => "Settings",
-            Tab::Access => "Access",
         }
     }
+}
 
-    /// Tabs whose data comes from the current database's catalog.
-    pub fn local(self) -> bool {
-        matches!(self, Tab::Schemas | Tab::Objects | Tab::Defaults | Tab::Rls | Tab::Access)
-    }
+#[derive(PartialEq)]
+pub enum Level {
+    Server,
+    Role(u32),
+    /// Always the connected database, `App::db`.
+    Database(String),
+    /// A schema in the connected database.
+    Schema(String),
+}
 
-    pub fn keys(self) -> &'static str {
+impl Level {
+    pub fn tabs(&self) -> &'static [Tab] {
         match self {
-            Tab::Roles => "⏎ access  n new  e attributes  p password  m join role  x leave role  D drop",
-            Tab::Databases => "⏎ use database  g grant  x revoke  o owner",
-            Tab::Schemas => "⏎ objects  g grant  x revoke  o owner",
-            Tab::Objects => "g grant  x revoke  o owner",
-            Tab::Defaults => "g add rule  x revoke",
-            Tab::Rls | Tab::Settings => "",
-            Tab::Access => "r pick role",
+            Level::Server => &[Tab::Roles, Tab::Databases, Tab::Settings],
+            Level::Role(_) => &[Tab::Access, Tab::Memberships, Tab::Settings],
+            Level::Database(_) => &[Tab::Schemas, Tab::Objects, Tab::Defaults, Tab::Rls, Tab::Settings],
+            Level::Schema(_) => &[Tab::Objects, Tab::Defaults, Tab::Rls],
         }
     }
 }
@@ -58,6 +62,20 @@ impl Tab {
 pub struct View {
     pub table: TableState,
     pub filter: String,
+}
+
+/// One entry of the navigation path, with the selection and filter of each of its tabs.
+pub struct Place {
+    pub level: Level,
+    pub tab: usize,
+    pub views: Vec<View>,
+}
+
+impl Place {
+    fn new(level: Level) -> Place {
+        let views = level.tabs().iter().map(|_| View::default()).collect();
+        Place { level, tab: 0, views }
+    }
 }
 
 pub enum Mode {
@@ -86,14 +104,14 @@ pub struct App {
     pub conn: Conn,
     pub server: Server,
     pub db: String,
-    pub tab: Tab,
-    pub views: [View; 8],
+    /// Navigation path. The first entry is `Level::Server` and is never popped.
+    pub path: Vec<Place>,
     pub show_system: bool,
     pub explain: bool,
     pub shared: Shared,
     pub local: Local,
+    /// Access of the role at the end of the path, if it ends at a role.
     pub access: Option<Access>,
-    pub access_role: Option<u32>,
     pub mode: Mode,
     pub status: Option<(String, bool)>,
     pub detail_scroll: u16,
@@ -116,14 +134,12 @@ impl App {
             conn,
             server,
             db,
-            tab: Tab::Roles,
-            views: Default::default(),
+            path: vec![Place::new(Level::Server)],
             show_system: false,
             explain: false,
             shared: Shared::default(),
             local: Local::default(),
             access: None,
-            access_role: None,
             mode: Mode::Normal,
             status: None,
             detail_scroll: 0,
@@ -132,6 +148,71 @@ impl App {
         app.load_shared()?;
         app.load_local()?;
         Ok(app)
+    }
+
+    pub fn place(&self) -> &Place {
+        &self.path[self.path.len() - 1]
+    }
+
+    fn place_mut(&mut self) -> &mut Place {
+        let i = self.path.len() - 1;
+        &mut self.path[i]
+    }
+
+    pub fn tab(&self) -> Tab {
+        let p = self.place();
+        p.level.tabs()[p.tab]
+    }
+
+    pub fn view(&self) -> &View {
+        let p = self.place();
+        &p.views[p.tab]
+    }
+
+    pub fn view_mut(&mut self) -> &mut View {
+        let p = self.place_mut();
+        &mut p.views[p.tab]
+    }
+
+    fn scope_role(&self) -> Option<&Role> {
+        match self.place().level {
+            Level::Role(oid) => self.shared.roles.iter().find(|r| r.oid == oid),
+            _ => None,
+        }
+    }
+
+    fn scope_schema(&self) -> Option<&str> {
+        match &self.place().level {
+            Level::Schema(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Breadcrumb: the top-level tab, then one name per place below it.
+    pub fn crumbs(&self) -> Vec<String> {
+        let top = &self.path[0];
+        let mut out = vec![top.level.tabs()[top.tab].title().to_string()];
+        out.extend(self.path[1..].iter().filter_map(|p| match &p.level {
+            Level::Server => None,
+            Level::Role(oid) => Some(self.role_name(*oid).to_string()),
+            Level::Database(name) | Level::Schema(name) => Some(name.clone()),
+        }));
+        out
+    }
+
+    pub fn keys(&self) -> &'static str {
+        match (&self.place().level, self.tab()) {
+            (Level::Server, Tab::Roles) => "⏎ open  n new  e attributes  p password  m join role  x leave role  D drop",
+            (Level::Server, Tab::Databases) | (_, Tab::Schemas) => "⏎ open  g grant  x revoke  o owner",
+            (_, Tab::Objects) => "g grant  x revoke  o owner",
+            (_, Tab::Defaults) => "g add rule  x revoke",
+            (Level::Role(_), Tab::Access) => {
+                "⏎ open role  b other database  e attributes  p password  m join role  x leave role  D drop"
+            }
+            (Level::Role(_), Tab::Memberships) => "⏎ open role  e attributes  p password  m join role  x leave role  D drop",
+            (Level::Role(_), _) => "e attributes  p password  m join role  x leave role  D drop",
+            _ => "",
+        }
     }
 
     fn load_shared(&mut self) -> Result<()> {
@@ -148,20 +229,35 @@ impl App {
 
     fn load_access(&mut self) -> Result<()> {
         self.access = None;
-        let Some(role) = self.access_role.and_then(|oid| self.shared.roles.iter().find(|r| r.oid == oid)).cloned()
-        else {
-            self.access_role = None;
-            return Ok(());
-        };
+        let Some(role) = self.scope_role().cloned() else { return Ok(()) };
         let c = self.conn.client(&self.db)?;
         self.access = Some(catalog::load_access(c, self.server.version_num, &role, &self.db)?);
         Ok(())
     }
 
+    fn sync_access(&mut self) {
+        if let Err(e) = self.load_access() {
+            self.fail("Loading access failed", &e);
+        }
+    }
+
     fn reload(&mut self) -> Result<()> {
         self.load_shared()?;
         self.load_local()?;
+        self.prune();
         self.load_access()
+    }
+
+    /// Cuts the path at the first role or schema that no longer exists, e.g. after DROP ROLE.
+    fn prune(&mut self) {
+        let gone = self.path.iter().position(|p| match &p.level {
+            Level::Role(oid) => !self.shared.roles.iter().any(|r| r.oid == *oid),
+            Level::Schema(s) => !self.local.schemas.iter().any(|x| &x.name == s),
+            Level::Server | Level::Database(_) => false,
+        });
+        if let Some(i) = gone {
+            self.path.truncate(i);
+        }
     }
 
     fn fail(&mut self, title: &str, e: &anyhow::Error) {
@@ -184,9 +280,13 @@ impl App {
         self.shared.roles.iter().find(|r| r.oid == oid).map_or("?", |r| r.name.as_str())
     }
 
-    pub fn list(&self, tab: Tab) -> List {
+    /// Rows of the current tab, narrowed to the current place and filter.
+    pub fn list(&self) -> List {
         let sys = self.show_system;
-        let (header, widths, mut rows): (Vec<&str>, Vec<Constraint>, Vec<ListRow>) = match tab {
+        let schema = self.scope_schema();
+        let in_scope = |s: &str| schema.is_none_or(|x| x == s);
+        let name = |s: &str, n: &str| if schema.is_some() { n.to_string() } else { format!("{s}.{n}") };
+        let (header, widths, mut rows): (Vec<&str>, Vec<Constraint>, Vec<ListRow>) = match self.tab() {
             Tab::Roles => (
                 vec!["Role (members)", "Login", "Attributes", "Member of"],
                 vec![Fill(3), Length(5), Fill(3), Fill(4)],
@@ -236,6 +336,54 @@ impl App {
                     })
                     .collect(),
             ),
+            Tab::Settings => {
+                let role = self.scope_role().map(|r| r.name.as_str());
+                let db = matches!(self.place().level, Level::Database(_)).then_some(self.db.as_str());
+                (
+                    vec!["Role", "Database", "Setting"],
+                    vec![Fill(2), Fill(2), Fill(4)],
+                    self.shared
+                        .settings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| role.is_none_or(|r| s.role == r) && db.is_none_or(|d| s.db == d))
+                        .map(|(i, s)| {
+                            let or = |v: &str, all: &str| if v.is_empty() { all.to_string() } else { v.to_string() };
+                            row(vec![or(&s.role, "(all roles)"), or(&s.db, "(all databases)"), s.setting.clone()], (i, 0), false)
+                        })
+                        .collect(),
+                )
+            }
+            Tab::Memberships => {
+                let me = match self.place().level {
+                    Level::Role(oid) => oid,
+                    _ => 0,
+                };
+                let ms = &self.shared.members;
+                let up = ms.iter().enumerate().filter(|(_, m)| m.member == me).map(|(i, m)| (i, "member of", m.role));
+                let down = ms.iter().enumerate().filter(|(_, m)| m.role == me).map(|(i, m)| (i, "has member", m.member));
+                (
+                    vec!["Relation", "Role", "Inherit", "Set", "Admin", "Granted by"],
+                    vec![Length(10), Fill(3), Length(7), Length(5), Length(5), Fill(2)],
+                    up.chain(down)
+                        .map(|(i, rel, other)| {
+                            let m = &ms[i];
+                            row(
+                                vec![
+                                    rel.into(),
+                                    self.role_name(other).into(),
+                                    check(m.inherit),
+                                    check(m.set),
+                                    check(m.admin),
+                                    m.grantor.clone(),
+                                ],
+                                (i, 0),
+                                !m.inherit,
+                            )
+                        })
+                        .collect(),
+                )
+            }
             Tab::Schemas => (
                 vec!["Schema", "Owner", "Contents", "Granted to"],
                 vec![Fill(3), Fill(2), Length(16), Fill(4)],
@@ -265,7 +413,7 @@ impl App {
                     .objects
                     .iter()
                     .enumerate()
-                    .filter(|(_, o)| sys || !system_schema(&o.schema))
+                    .filter(|(_, o)| (sys || !system_schema(&o.schema)) && in_scope(&o.schema))
                     .map(|(i, o)| {
                         let rls = match (o.rls, o.force_rls) {
                             (true, true) => "forced",
@@ -274,7 +422,7 @@ impl App {
                         };
                         row(
                             vec![
-                                format!("{}.{}", o.schema, o.name),
+                                name(&o.schema, &o.name),
                                 o.kind.label().into(),
                                 o.owner.clone(),
                                 rls.into(),
@@ -293,6 +441,8 @@ impl App {
                     .defacls
                     .iter()
                     .enumerate()
+                    // Rules without a schema apply in every schema.
+                    .filter(|(_, d)| d.schema.as_deref().is_none_or(in_scope))
                     .flat_map(|(i, d)| {
                         d.grants.iter().enumerate().map(move |(j, g)| {
                             row(
@@ -317,7 +467,7 @@ impl App {
                     .rls
                     .iter()
                     .enumerate()
-                    .filter(|(_, t)| sys || !system_schema(&t.schema))
+                    .filter(|(_, t)| (sys || !system_schema(&t.schema)) && in_scope(&t.schema))
                     .map(|(i, t)| {
                         let state = match (t.enabled, t.forced) {
                             (true, true) => "forced",
@@ -325,23 +475,10 @@ impl App {
                             _ => "off",
                         };
                         row(
-                            vec![format!("{}.{}", t.schema, t.name), state.into(), t.policies.len().to_string(), t.owner.clone()],
+                            vec![name(&t.schema, &t.name), state.into(), t.policies.len().to_string(), t.owner.clone()],
                             (i, 0),
                             !t.enabled,
                         )
-                    })
-                    .collect(),
-            ),
-            Tab::Settings => (
-                vec!["Role", "Database", "Setting"],
-                vec![Fill(2), Fill(2), Fill(4)],
-                self.shared
-                    .settings
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| {
-                        let or = |v: &str, all: &str| if v.is_empty() { all.to_string() } else { v.to_string() };
-                        row(vec![or(&s.role, "(all roles)"), or(&s.db, "(all databases)"), s.setting.clone()], (i, 0), false)
                     })
                     .collect(),
             ),
@@ -371,7 +508,7 @@ impl App {
                 (vec!["Kind", "Object", "Privileges", "Via"], vec![Length(10), Fill(4), Fill(3), Fill(3)], rows)
             }
         };
-        let f = self.views[tab as usize].filter.to_lowercase();
+        let f = self.view().filter.to_lowercase();
         if !f.is_empty() {
             rows.retain(|r| r.cells.iter().any(|c| c.to_lowercase().contains(&f)));
         }
@@ -379,12 +516,16 @@ impl App {
     }
 
     pub fn selected(&self) -> Option<(usize, usize)> {
-        let i = self.views[self.tab as usize].table.selected()?;
-        self.list(self.tab).rows.get(i).map(|r| r.id)
+        let i = self.view().table.selected()?;
+        self.list().rows.get(i).map(|r| r.id)
     }
 
+    /// The role a role action applies to: the place's role, or the selected row on Roles.
     fn selected_role(&self) -> Option<Role> {
-        if self.tab != Tab::Roles {
+        if let Some(r) = self.scope_role() {
+            return Some(r.clone());
+        }
+        if self.tab() != Tab::Roles {
             return None;
         }
         self.selected().map(|(i, _)| self.shared.roles[i].clone())
@@ -393,7 +534,7 @@ impl App {
     fn target(&self) -> Option<Target> {
         let (i, _) = self.selected()?;
         let db = Some(self.db.clone());
-        match self.tab {
+        match self.tab() {
             Tab::Databases => {
                 let d = &self.shared.dbs[i];
                 Some(Target {
@@ -447,14 +588,48 @@ impl App {
         }
     }
 
-    fn set_tab(&mut self, tab: Tab) {
-        self.tab = tab;
+    fn set_tab(&mut self, i: usize) {
+        let p = self.place_mut();
+        if i < p.views.len() {
+            p.tab = i;
+            self.detail_scroll = 0;
+        }
+    }
+
+    /// A place already on the path is returned to, not added again. Going from a role to another role keeps the tab.
+    fn push(&mut self, level: Level) {
+        if let Some(at) = self.path.iter().position(|p| p.level == level) {
+            self.path.truncate(at + 1);
+        } else {
+            let tab = match (&self.place().level, &level) {
+                (Level::Role(_), Level::Role(_)) => self.place().tab,
+                _ => 0,
+            };
+            self.path.push(Place { tab, ..Place::new(level) });
+        }
         self.detail_scroll = 0;
+        self.sync_access();
+    }
+
+    fn pop(&mut self) {
+        if self.path.len() > 1 {
+            self.path.pop();
+            self.detail_scroll = 0;
+            self.sync_access();
+        }
+    }
+
+    /// Back to the server level, on `tab`.
+    fn home(&mut self, tab: Tab) {
+        self.path.truncate(1);
+        self.path[0].tab = Level::Server.tabs().iter().position(|t| *t == tab).unwrap_or(0);
+        self.detail_scroll = 0;
+        self.access = None;
     }
 
     fn move_sel(&mut self, delta: isize) {
-        let n = self.list(self.tab).rows.len();
-        let t = &mut self.views[self.tab as usize].table;
+        let n = self.list().rows.len();
+        let t = &mut self.view_mut().table;
         if n == 0 {
             t.select(None);
             return;
@@ -466,7 +641,7 @@ impl App {
 
     fn key_normal(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let i = self.tab as usize;
+        let (i, n) = (self.place().tab, self.place().views.len());
         match key.code {
             KeyCode::Char('c') if ctrl => self.quit = true,
             KeyCode::Char('r') if ctrl => self.refresh(),
@@ -474,9 +649,9 @@ impl App {
             KeyCode::Char('d') if ctrl => self.move_sel(10),
             KeyCode::Char('u') if ctrl => self.move_sel(-10),
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char(c @ '1'..='8') => self.set_tab(Tab::ALL[c as usize - '1' as usize]),
-            KeyCode::Tab => self.set_tab(Tab::ALL[(i + 1) % 8]),
-            KeyCode::BackTab => self.set_tab(Tab::ALL[(i + 7) % 8]),
+            KeyCode::Char(c @ '1'..='9') => self.set_tab(c as usize - '1' as usize),
+            KeyCode::Tab => self.set_tab((i + 1) % n),
+            KeyCode::BackTab => self.set_tab((i + n - 1) % n),
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
             KeyCode::PageDown => self.move_sel(10),
@@ -486,34 +661,43 @@ impl App {
             KeyCode::Char('J') => self.detail_scroll = self.detail_scroll.saturating_add(3),
             KeyCode::Char('K') => self.detail_scroll = self.detail_scroll.saturating_sub(3),
             KeyCode::Char('/') => self.mode = Mode::Filter,
-            KeyCode::Esc => self.views[i].filter.clear(),
+            KeyCode::Esc if !self.view().filter.is_empty() => self.view_mut().filter.clear(),
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => self.pop(),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.enter(),
+            KeyCode::Char('r') => self.home(Tab::Roles),
+            KeyCode::Char('d') => self.home(Tab::Databases),
             KeyCode::Char('?') => {
                 self.explain = !self.explain;
                 self.detail_scroll = 0;
             }
             KeyCode::Char('s') => self.show_system = !self.show_system,
             KeyCode::Char('b') => self.drive(Flow::UseDb, Vec::new()),
-            KeyCode::Enter => self.enter(),
             KeyCode::Char(c) => self.action(c),
             _ => {}
         }
     }
 
     fn key_filter(&mut self, key: KeyEvent) {
-        let view = &mut self.views[self.tab as usize];
-        match key.code {
-            KeyCode::Esc => view.filter.clear(),
-            KeyCode::Enter => {}
+        let view = self.view_mut();
+        let typing = match key.code {
+            KeyCode::Esc => {
+                view.filter.clear();
+                false
+            }
+            KeyCode::Enter => false,
             KeyCode::Backspace => {
                 view.filter.pop();
-                self.mode = Mode::Filter;
+                true
             }
             KeyCode::Char(c) => {
                 view.filter.push(c);
                 view.table.select(Some(0));
-                self.mode = Mode::Filter;
+                true
             }
-            _ => self.mode = Mode::Filter,
+            _ => true,
+        };
+        if typing {
+            self.mode = Mode::Filter;
         }
     }
 
@@ -591,30 +775,28 @@ impl App {
     fn outcome(&mut self, o: Outcome) {
         match o {
             Outcome::Run(a) => self.mode = Mode::Confirm(a),
-            Outcome::UseDb(db) => self.use_db(db),
-            Outcome::Inspect(oid) => {
-                self.access_role = Some(oid);
-                self.set_tab(Tab::Access);
-                self.views[Tab::Access as usize].table.select(Some(0));
-                if let Err(e) = self.load_access() {
-                    self.fail("Loading access failed", &e);
-                }
+            Outcome::UseDb(db) => {
+                self.use_db(db);
             }
         }
     }
 
-    fn use_db(&mut self, db: String) {
+    /// Connects to `db`. Places under the old database are replaced by `db` itself.
+    fn use_db(&mut self, db: String) -> bool {
         let prev = std::mem::replace(&mut self.db, db);
-        if let Err(e) = self.load_local().and_then(|_| self.load_access()) {
+        if let Err(e) = self.load_local() {
             self.db = prev;
-            let _ = self.load_local().and_then(|_| self.load_access());
+            let _ = self.load_local();
             self.fail("Switching database failed", &e);
-            return;
+            return false;
         }
-        for t in Tab::ALL.into_iter().filter(|t| t.local()) {
-            self.views[t as usize] = View::default();
+        if let Some(i) = self.path.iter().position(|p| matches!(p.level, Level::Database(_))) {
+            self.path.truncate(i);
+            self.path.push(Place::new(Level::Database(self.db.clone())));
         }
+        self.sync_access();
         self.status = Some((format!("using database {}", self.db), false));
+        true
     }
 
     fn refresh(&mut self) {
@@ -625,39 +807,47 @@ impl App {
     }
 
     fn enter(&mut self) {
-        let Some((i, _)) = self.selected() else { return };
-        match self.tab {
-            Tab::Roles => self.outcome(Outcome::Inspect(self.shared.roles[i].oid)),
+        let Some((i, j)) = self.selected() else { return };
+        match self.tab() {
+            Tab::Roles => self.push(Level::Role(self.shared.roles[i].oid)),
             Tab::Databases => {
                 let d = &self.shared.dbs[i];
                 if !d.allow_conn {
                     self.status = Some((format!("{} does not allow connections", d.name), true));
                     return;
                 }
-                self.use_db(d.name.clone());
-                if matches!(self.mode, Mode::Normal) {
-                    self.set_tab(Tab::Schemas);
+                let name = d.name.clone();
+                if name != self.db && !self.use_db(name.clone()) {
+                    return;
                 }
+                self.push(Level::Database(name));
             }
-            Tab::Schemas => {
-                let filter = format!("{}.", self.local.schemas[i].name);
-                let v = &mut self.views[Tab::Objects as usize];
-                v.filter = filter;
-                v.table.select(Some(0));
-                self.set_tab(Tab::Objects);
+            Tab::Schemas => self.push(Level::Schema(self.local.schemas[i].name.clone())),
+            Tab::Memberships => {
+                let m = &self.shared.members[i];
+                let other = if Some(m.member) == self.scope_role().map(|r| r.oid) { m.role } else { m.member };
+                self.push(Level::Role(other));
+            }
+            Tab::Access if i == 0 => {
+                let reach = self.access.as_ref().map(|a| a.reach[j].name.as_str());
+                if let Some(oid) = self.shared.roles.iter().find(|r| Some(r.name.as_str()) == reach).map(|r| r.oid) {
+                    self.push(Level::Role(oid));
+                }
             }
             _ => {}
         }
     }
 
     fn action(&mut self, c: char) {
-        let flow = match (self.tab, c) {
+        let tab = self.tab();
+        let roles = tab == Tab::Roles || matches!(self.place().level, Level::Role(_));
+        let flow = match (tab, c) {
             (Tab::Roles, 'n') => Some(Flow::CreateRole),
-            (Tab::Roles, 'e') => self.selected_role().map(Flow::EditRole),
-            (Tab::Roles, 'p') => self.selected_role().map(Flow::Password),
-            (Tab::Roles, 'm') => self.selected_role().map(Flow::Join),
-            (Tab::Roles, 'x') => self.selected_role().map(Flow::Leave),
-            (Tab::Roles, 'D') => self.selected_role().map(Flow::DropRole),
+            (_, 'e') if roles => self.selected_role().map(Flow::EditRole),
+            (_, 'p') if roles => self.selected_role().map(Flow::Password),
+            (_, 'm') if roles => self.selected_role().map(Flow::Join),
+            (_, 'x') if roles => self.selected_role().map(Flow::Leave),
+            (_, 'D') if roles => self.selected_role().map(Flow::DropRole),
             (Tab::Databases | Tab::Schemas | Tab::Objects, 'g') => self.target().map(Flow::Grant),
             (Tab::Databases | Tab::Schemas | Tab::Objects, 'x') => self.target().map(Flow::Revoke),
             (Tab::Databases | Tab::Schemas | Tab::Objects, 'o') => self.target().map(Flow::Owner),
@@ -667,7 +857,6 @@ impl App {
                 let grant = acl.grants[j].clone();
                 Flow::DefRevoke { db: self.db.clone(), acl, grant }
             }),
-            (Tab::Access, 'r') => Some(Flow::Inspect),
             _ => None,
         };
         if let Some(flow) = flow {

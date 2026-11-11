@@ -55,11 +55,12 @@ fn grants(out: &mut Lines, grants: &[Grant], acl_default: bool) {
 pub fn lines(app: &App) -> Lines {
     let mut out = Vec::new();
     let sel = app.selected();
-    match (app.tab, sel) {
+    match (app.tab(), sel) {
         (Tab::Access, _) => access(app, sel, &mut out),
         (_, None) => note(&mut out, "nothing selected"),
         (Tab::Roles, Some((i, _))) => role(app, i, &mut out),
         (Tab::Databases, Some((i, _))) => database(app, i, &mut out),
+        (Tab::Memberships, Some((i, _))) => membership(app, i, &mut out),
         (Tab::Schemas, Some((i, _))) => schema(app, i, &mut out),
         (Tab::Objects, Some((i, _))) => object(app, i, &mut out),
         (Tab::Defaults, Some((i, j))) => default_acl(app, i, j, &mut out),
@@ -67,6 +68,16 @@ pub fn lines(app: &App) -> Lines {
         (Tab::Settings, Some((i, _))) => setting(app, i, &mut out),
     }
     out
+}
+
+fn membership(app: &App, i: usize, out: &mut Lines) {
+    let m = &app.shared.members[i];
+    let (group, member) = (app.role_name(m.role), app.role_name(m.member));
+    head(out, format!("{member} is a member of {group}"));
+    kv(out, "INHERIT", format!("{:<4} {member} uses the privileges of {group} without SET ROLE", yes(m.inherit)));
+    kv(out, "SET", format!("{:<4} {member} may SET ROLE {group}", yes(m.set)));
+    kv(out, "ADMIN", format!("{:<4} {member} may grant {group} to other roles and revoke it", yes(m.admin)));
+    kv(out, "granted by", m.grantor.clone());
 }
 
 fn role(app: &App, i: usize, out: &mut Lines) {
@@ -128,7 +139,7 @@ fn role(app: &App, i: usize, out: &mut Lines) {
         }
     }
     head(out, "Keys");
-    note(out, "Enter shows what this role can access in the current database");
+    note(out, "Enter opens the role: its access in the current database, memberships and settings");
 }
 
 fn database(app: &App, i: usize, out: &mut Lines) {
@@ -138,7 +149,7 @@ fn database(app: &App, i: usize, out: &mut Lines) {
         note(out, d.comment.clone());
     }
     if d.name == app.db {
-        note(out, "current database: tabs 3-6 and 8 show its contents");
+        note(out, "connected (●)");
     }
     kv(out, "owner", d.owner.clone());
     kv(out, "encoding", d.encoding.clone());
@@ -156,6 +167,8 @@ fn database(app: &App, i: usize, out: &mut Lines) {
             item(out, format!("{}  ({scope})", s.setting));
         }
     }
+    head(out, "Keys");
+    note(out, "Enter opens the database: schemas, objects, default privileges, RLS");
 }
 
 fn schema(app: &App, i: usize, out: &mut Lines) {
@@ -279,7 +292,7 @@ fn setting(app: &App, i: usize, out: &mut Lines) {
 
 fn access(app: &App, sel: Option<(usize, usize)>, out: &mut Lines) {
     let Some(a) = &app.access else {
-        note(out, "No role picked. Press r, or Enter on a role in tab 1.");
+        note(out, "Access not loaded. ^r retries.");
         return;
     };
     let r = &a.role;

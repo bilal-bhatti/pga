@@ -27,7 +27,7 @@ Rust terminal UI (ratatui, sync `postgres` crate) for browsing and managing Post
 | `src/conn.rs` | libpq-style defaults (`PG*` env, socket probe, `~/.pgpass`, `sslmode`), per-database client cache |
 | `src/catalog.rs` | every catalog query and its row type |
 | `src/wizard.rs` | multi-step flows that build the GRANT / REVOKE / ALTER / CREATE / DROP SQL |
-| `src/app.rs` | state, tabs, keys, running confirmed actions |
+| `src/app.rs` | navigation path (`Level`, `Place`, `Tab`), lists, keys, running confirmed actions |
 | `src/detail.rs`, `src/explain.rs`, `src/ui.rs` | detail pane, `?` explain pane, rendering |
 
 ## Conventions

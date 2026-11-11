@@ -47,12 +47,10 @@ impl Action {
 pub enum Outcome {
     Run(Action),
     UseDb(String),
-    Inspect(u32),
 }
 
 pub enum Flow {
     UseDb,
-    Inspect,
     Grant(Target),
     Revoke(Target),
     Owner(Target),
@@ -235,18 +233,6 @@ impl Flow {
                     ctx.dbs.iter().filter(|d| d.allow_conn).map(|d| opt(d.name.clone(), d.name.clone())).collect(),
                 ),
                 _ => Next::Done(Outcome::UseDb(one(0))),
-            },
-
-            Flow::Inspect => match n {
-                0 => {
-                    let mut roles: Vec<&Role> = ctx.roles.iter().collect();
-                    roles.sort_by_key(|r| (r.system(), r.name.clone()));
-                    pick(
-                        "Show effective access of which role?",
-                        roles.into_iter().map(|r| opt(role_label(r), r.oid.to_string())).collect(),
-                    )
-                }
-                _ => Next::Done(Outcome::Inspect(one(0).parse().unwrap_or_default())),
             },
 
             Flow::Grant(t) => match n {

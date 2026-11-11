@@ -4,14 +4,17 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
 
-use crate::app::{App, Mode, Tab};
+use crate::app::{App, Level, Mode, Tab};
 use crate::wizard::{Action, Step, StepKind};
 use crate::{detail, explain};
 
-const GLOBAL_KEYS: &str = "1-8/Tab switch  j/k move  J/K scroll detail  / filter  ? explain  s system objects  b database  ^r reload  q quit";
+const GLOBAL_KEYS: &str =
+    "Esc back  Tab view  r roles  d databases  / filter  ? explain  s system  b database  J/K scroll  ^r reload  q quit";
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let [head, _, tabs, body, foot] = Layout::vertical([
+    let [head, _, path, _, tabs, body, foot] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -24,22 +27,41 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Span::styled(" pga ", Style::new().black().on_cyan().bold()),
         Span::raw(format!("  {}@{}", app.server.user, app.conn.endpoint())),
         Span::raw(format!("  PostgreSQL {}", app.server.version)),
-        Span::raw("  db: "),
-        Span::styled(app.db.clone(), Style::new().cyan().bold()),
     ];
     if app.server.superuser {
         header.push(Span::styled("  superuser", Style::new().red()));
     }
     f.render_widget(Line::from(header), head);
 
-    let titles: Vec<String> = Tab::ALL.iter().enumerate().map(|(i, t)| format!("{} {}", i + 1, t.title())).collect();
-    f.render_widget(Tabs::new(titles).select(app.tab as usize).highlight_style(Style::new().black().on_cyan()), tabs);
+    let crumbs = app.crumbs();
+    let last = crumbs.len() - 1;
+    let mut spans = vec![Span::raw(" ")];
+    for (i, c) in crumbs.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" › ", Style::new().dark_gray()));
+        }
+        spans.push(if i == last { Span::styled(c, Style::new().cyan().bold()) } else { Span::raw(c) });
+    }
+    f.render_widget(Line::from(spans), path);
+
+    let place = app.place();
+    let titles: Vec<String> = place
+        .level
+        .tabs()
+        .iter()
+        .enumerate()
+        .map(|(i, t)| match t {
+            Tab::Access => format!("{} Access in {}", i + 1, app.db),
+            _ => format!("{} {}", i + 1, t.title()),
+        })
+        .collect();
+    f.render_widget(Tabs::new(titles).select(place.tab).highlight_style(Style::new().black().on_cyan()), tabs);
 
     let [left, right] = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(body);
     draw_list(f, app, left);
 
     let (title, lines) = if app.explain {
-        (format!(" Explain: {} ", app.tab.title()), explain::lines(app))
+        (format!(" Explain: {} ", app.tab().title()), explain::lines(app))
     } else {
         (" Details ".to_string(), detail::lines(app))
     };
@@ -51,11 +73,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let first = match (&app.mode, &app.status) {
         (Mode::Filter, _) => Line::from(vec![
             Span::styled(" / ", Style::new().black().on_yellow()),
-            Span::raw(format!(" {}▏  Enter keep  Esc clear", app.views[app.tab as usize].filter)),
+            Span::raw(format!(" {}▏  Enter keep  Esc clear", app.view().filter)),
         ]),
         (_, Some((msg, true))) => Line::from(Span::styled(format!(" {msg}"), Style::new().red())),
         (_, Some((msg, false))) => Line::from(Span::styled(format!(" {msg}"), Style::new().green())),
-        _ => Line::from(Span::styled(format!(" {}", app.tab.keys()), Style::new().cyan())),
+        _ => Line::from(Span::styled(format!(" {}", app.keys()), Style::new().cyan())),
     };
     let [l1, l2] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(foot);
     f.render_widget(first, l1);
@@ -70,19 +92,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
-    let tab = app.tab;
-    let list = app.list(tab);
+    let tab = app.tab();
+    let list = app.list();
     let n = list.rows.len();
-    let mut title = format!(" {} ({n})", tab.title());
-    if tab == Tab::Access {
-        match &app.access {
-            Some(a) => title = format!(" Access of {} in {} ({n})", a.role.name, a.db),
-            None => title = " Access: press r to pick a role".into(),
-        }
-    } else if tab.local() {
-        title.push_str(&format!(" in {}", app.db));
-    }
-    let filter = &app.views[tab as usize].filter;
+    let mut title = match &app.place().level {
+        Level::Server => format!(" {}", tab.title()),
+        Level::Role(oid) if tab == Tab::Access => format!(" Access of {} in {}", app.role_name(*oid), app.db),
+        Level::Role(oid) => format!(" {} of {}", tab.title(), app.role_name(*oid)),
+        Level::Database(db) => format!(" {} in {db}", tab.title()),
+        Level::Schema(s) => format!(" {} in {}.{s}", tab.title(), app.db),
+    };
+    title.push_str(&format!(" ({n})"));
+    let filter = &app.view().filter;
     if !filter.is_empty() {
         title.push_str(&format!("  filter: {filter}"));
     }
@@ -91,7 +112,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     }
     title.push(' ');
 
-    let state = &mut app.views[tab as usize].table;
+    let state = &mut app.view_mut().table;
     match state.selected() {
         _ if n == 0 => state.select(None),
         None => state.select(Some(0)),

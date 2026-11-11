@@ -31,7 +31,19 @@ fn notes(tab: Tab) -> &'static [&'static str] {
              REVOKE CONNECT ON DATABASE d FROM PUBLIC.",
             "The owner holds all privileges implicitly; only the owner (or a member of the owning role) and \
              superusers can drop the database. Ownership is not a grant; change it with ALTER DATABASE d OWNER TO r.",
-            "Enter switches the current database; tabs 3-6 and 8 read that database's catalog.",
+            "Enter opens a database. pga connects to it, because its schemas, objects, default privileges and RLS \
+             live in that database's own catalog.",
+        ],
+        Tab::Memberships => &[
+            "Each row is one GRANT g TO m involving this role. 'member of': this role is m, the member. \
+             'has member': this role is g, the group.",
+            "Inherit: the member uses the group's privileges without SET ROLE. Set: the member may SET ROLE to \
+             the group and act as it; objects it then creates are owned by the group. Admin: the member may grant \
+             the group to other roles and revoke it.",
+            "Before PG16 there are no per-membership options: inherit follows the member's INHERIT attribute and \
+             SET ROLE is always allowed.",
+            "Privileges pass along a chain of memberships (a in b, b in c) only while every link inherits. \
+             Dim rows do not inherit.",
         ],
         Tab::Schemas => &[
             "A schema is a namespace inside one database, the closest thing to a MySQL database. Objects are named \
@@ -48,8 +60,9 @@ fn notes(tab: Tab) -> &'static [&'static str] {
              owning role, or a superuser can ALTER or DROP the object.",
             "New functions are executable by PUBLIC by default; new tables give nothing to anyone but the owner.",
             "GRANT ... ON ALL TABLES IN SCHEMA s covers existing tables only. Future tables need default \
-             privileges (tab 5).",
-            "A grant here counts only with CONNECT on the database and USAGE on the schema. Tab 8 checks every layer.",
+             privileges (Default privs).",
+            "A grant here counts only with CONNECT on the database and USAGE on the schema. A role's Access view \
+             checks every layer.",
             "* marks WITH GRANT OPTION: the grantee may grant the privilege to others.",
         ],
         Tab::Defaults => &[
@@ -79,7 +92,8 @@ fn notes(tab: Tab) -> &'static [&'static str] {
         ],
         Tab::Access => &[
             "Effective privileges of one role in the current database, after role membership, PUBLIC grants, \
-             ownership and superuser status, as computed by has_*_privilege() and pg_has_role().",
+             ownership and superuser status, as computed by has_*_privilege() and pg_has_role(). b switches the \
+             database.",
             "Layers: CONNECT on the database, then USAGE on the schema, then the object privilege. Dim rows are \
              blocked by a missing layer above them, or have no privileges.",
             "Via lists the grants that apply to the role: direct, through a role it inherits from, or PUBLIC. \
@@ -92,6 +106,7 @@ fn notes(tab: Tab) -> &'static [&'static str] {
 fn queries(tab: Tab, v: i32) -> Vec<String> {
     match tab {
         Tab::Roles => vec![ROLES_SQL.into(), members_sql(v).into()],
+        Tab::Memberships => vec![members_sql(v).into()],
         Tab::Databases => vec![DATABASES_SQL.into(), database_acl_sql()],
         Tab::Schemas => vec![SCHEMAS_SQL.into(), schema_acl_sql()],
         Tab::Objects => vec![relations_sql(), relation_acl_sql(), column_acl_sql(), routines_sql(), routine_acl_sql()],
@@ -105,13 +120,14 @@ fn queries(tab: Tab, v: i32) -> Vec<String> {
 pub fn lines(app: &App) -> Vec<Line<'static>> {
     let head = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let mut out = Vec::new();
-    for n in notes(app.tab) {
+    let tab = app.tab();
+    for n in notes(tab) {
         out.push(Line::from(format!("• {n}")));
         out.push(Line::default());
     }
-    let title = if app.tab == Tab::Access { "SQL ($1 = role oid)" } else { "SQL" };
+    let title = if tab == Tab::Access { "SQL ($1 = role oid)" } else { "SQL" };
     out.push(Line::from(Span::styled(title, head)));
-    for q in queries(app.tab, app.server.version_num) {
+    for q in queries(tab, app.server.version_num) {
         out.push(Line::default());
         for l in q.lines() {
             out.push(Line::from(Span::styled(l.to_string(), Style::new().fg(Color::Cyan))));

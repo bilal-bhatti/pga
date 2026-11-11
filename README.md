@@ -52,19 +52,33 @@ pga [options] [conninfo]
 Unset options fall back to `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`,
 `PGPASSWORD`, `PGSSLMODE` and `~/.pgpass`, as in psql.
 
-## Tabs
+## Navigation
+
+pga follows PostgreSQL's layout: the server holds roles and databases, a
+database holds schemas, a schema holds objects. `Enter` opens the selected
+row, `Esc` goes back, and the line above the tabs shows the path, e.g.
+`Databases › lmsdb › app`.
+
+| Place | Reached by | Tabs |
+|-------|------------|------|
+| Server | start, `r`, `d` | Roles, Databases, Settings |
+| Role | `Enter` on a role, a membership, or a role row in Access | Access, Memberships, Settings |
+| Database | `Enter` on a database; pga connects to it | Schemas, Objects, Default privs, RLS, Settings |
+| Schema | `Enter` on a schema | Objects, Default privs, RLS |
 
 | Tab | Shows | Actions |
 |-----|-------|---------|
-| 1 Roles | roles, attributes, memberships; `(n)` is the member count | `n` new, `e` attributes, `p` password, `m` join, `x` leave, `D` drop, `Enter` access |
-| 2 Databases | databases, owners, sizes, grants | `g` grant, `x` revoke, `o` owner, `Enter` switch database |
-| 3 Schemas | schemas in the current database | `g` grant, `x` revoke, `o` owner, `Enter` objects |
-| 4 Objects | tables, views, sequences, functions and their grants | `g` grant, `x` revoke, `o` owner |
-| 5 Default privs | `ALTER DEFAULT PRIVILEGES` rules | `g` add rule, `x` revoke |
-| 6 RLS | tables with row-level security and their policies | |
-| 7 Settings | `ALTER ROLE ... SET` and `ALTER DATABASE ... SET` values | |
-| 8 Access | everything one role can reach in the current database, and through which grant | `r` pick role |
+| Roles | roles, attributes, memberships; `(n)` is the member count | `n` new, `e` attributes, `p` password, `m` join, `x` leave, `D` drop |
+| Access | everything the role can reach in the connected database, and through which grant | role actions |
+| Memberships | the groups the role belongs to and the roles that belong to it, with INHERIT / SET / ADMIN | role actions |
+| Databases | databases, owners, sizes, grants | `g` grant, `x` revoke, `o` owner |
+| Schemas | schemas, owners, grants | `g` grant, `x` revoke, `o` owner |
+| Objects | tables, views, sequences, functions and their grants | `g` grant, `x` revoke, `o` owner |
+| Default privs | `ALTER DEFAULT PRIVILEGES` rules | `g` add rule, `x` revoke |
+| RLS | tables with row-level security and their policies | |
+| Settings | `ALTER ROLE ... SET` and `ALTER DATABASE ... SET` values for the place | |
 
+Inside a role, the role actions (`e`, `p`, `m`, `x`, `D`) apply to that role.
 Every change opens a confirm dialog with the exact SQL; it runs in one
 transaction.
 
@@ -72,13 +86,16 @@ transaction.
 
 | Key | Action |
 |-----|--------|
-| `1`-`8`, `Tab`, `Shift-Tab` | switch tab |
+| `Enter`, `→`, `l` | open the selected row |
+| `Esc`, `←`, `h` | back; the first `Esc` clears an active filter |
+| `1`-`5`, `Tab`, `Shift-Tab` | switch tab |
+| `r`, `d` | jump to Roles or Databases |
 | `j`/`k`, arrows, `PgUp`/`PgDn`, `^d`/`^u`, `Home`/`End` | move |
 | `J`/`K` | scroll the detail pane |
-| `/` | filter rows; `Esc` clears |
+| `/` | filter rows |
 | `?` | toggle the explain pane |
 | `s` | show or hide system roles, schemas and objects |
-| `b` | pick a database |
+| `b` | connect to another database |
 | `^r`, `F5` | reload |
 | `q`, `^c` | quit |
 
