@@ -2,6 +2,18 @@
 name = "pga"
 version = "0.1.0"
 edition = "2024"
+description = "Terminal UI for PostgreSQL roles, databases and privileges"
+license = "MIT"
+repository = "https://github.com/bilal-bhatti/pga"
+homepage = "https://github.com/bilal-bhatti/pga"
+authors = ["Bilal Bhatti"]
+readme = "README.md"
+# The crates.io name pga belongs to another project.
+publish = false
+
+[[bin]]
+name = "pga"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -10,3 +22,22 @@ postgres = "0.19"
 postgres-native-tls = "0.5"
 postgres-protocol = "0.6"
 ratatui = "0.30"
+
+# dist skips packages with publish = false unless told otherwise.
+[package.metadata.dist]
+dist = true
+
+[package.metadata.release]
+publish = false
+allow-branch = ["main"]
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
