@@ -1,0 +1,21 @@
+# cura configuration.
+#
+# `docs` lists the directories and files that hold governed docs. Only
+# markdown under these paths is indexed, and every .md inside them needs
+# frontmatter. Markdown elsewhere (READMEs, plans, vendored docs) is ignored.
+# `docs: .` (or no key) governs the whole repo. The first entry is the docs dir
+# `cura prompt` renders into example paths.
+docs:
+  - docs
+  - AGENTS.md
+
+# `sources` lists read-only upstream directories. They show in the reader
+# and are never indexed or checked.
+# sources:
+#   - upstream
+
+# `exclude` lists root-relative path prefixes to leave out of the docs
+# roots. .git, .cura and .claude are never governed, and .gitignore'd files
+# are never read.
+# exclude:
+#   - docs/archive

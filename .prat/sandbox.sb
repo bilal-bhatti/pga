@@ -1,0 +1,44 @@
+;; Extra sandbox-exec rules for this directory.
+;;
+;; Appended after the base profile and after the user's sandbox.local.sb, and
+;; before the deny that protects this directory and the ~/.claude pin.
+;; sandbox-exec applies the last matching rule, so rules here override anything
+;; earlier.
+;;
+;; Parameters: TARGET_DIR, TMP_DIR, HOME_DIR, CACHE_DIR.
+;;
+;; ~ stands for your home directory and @ for this directory. Both are replaced
+;; with the path before the profile is printed. Only on their own: ~/projects and
+;; @/vendor are rejected, write (string-append ~ "/projects").
+;;
+;; The sandbox cannot write to .prat, so this file changes only from outside.
+;; It is read out of the target directory, so a repository you clone can ship one
+;; and widen your sandbox. Applying it is reported on stderr.
+;;
+;; Check what the rules here produce without running anything:
+;;   prat --write-profile -
+;;   prat --check
+;;
+;; No rules are active. Uncomment one, or add your own.
+
+;; Read a sibling checkout.
+;; (allow file-read* (subpath (string-append ~ "/projects/other")))
+
+;; Read a toolchain kept outside the target directory. A runtime resolving its own
+;; libraries needs metadata on the parent directories too, or it fails at exec with
+;; no diagnostic.
+;; (allow file-read-metadata
+;;     (literal (string-append ~ "/.local"))
+;;     (literal (string-append ~ "/.local/share")))
+;; (allow file-read* (subpath (string-append ~ "/.local/share/mise")))
+
+;; Write outside the target directory. Name file-write-create as well, or files
+;; can be modified but not created.
+;; (allow file-write* file-write-create (subpath (string-append ~ "/.gradle")))
+
+;; Narrow rather than widen, for instance keeping a directory out of reach:
+;; (deny file-read* (subpath (string-append @ "/secrets")))
+;; (deny file-read* (regex #"/frp[cs]\.(ini|toml|ya?ml|json)($|\.)"))
+
+(allow file-read* (subpath (string-append ~ "/.rustup")))
+(allow file-read* file-write* file-write-create (subpath (string-append ~ "/.cargo")))

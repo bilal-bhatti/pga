@@ -1,0 +1,17 @@
+#!/bin/sh
+# cura pre-commit hook for the doc governance system.
+# Versioned + shared: activate per clone with `git config core.hooksPath .cura/hooks`.
+#
+# This is a thin shim. The hook body lives in `cura hook pre-commit`, which
+# builds the doc index once and runs an advisory sweep plus a structural gate,
+# both scoped to HEAD. The hook is a backstop, not the forcing function - the
+# doc-* procedure is. Bypass deliberately with --no-verify.
+
+# Bootstrap guard: cura cannot check for its own absence. Without this a
+# missing cura would exit 127 and block the commit; a graceful skip is wanted.
+if ! command -v cura >/dev/null 2>&1; then
+	echo "pre-commit: cura not on PATH - skipping doc checks (go install cura)"
+	exit 0
+fi
+
+exec cura hook pre-commit

@@ -1,0 +1,13 @@
+# Environment for this directory, added to prat's list rather than replacing it.
+# Syntax: NAME or +NAME forwards, -PATTERN drops; see $CONFIG_DIR/env.
+#
+# Every '-' line applies to what this file forwards, so a name matching *TOKEN*,
+# *SECRET*, *API_KEY* or another credential pattern is dropped even when named
+# here. This file is read out of the target directory, so a repository you clone
+# cannot widen your environment onto a credential. To forward one, name it in
+# $CONFIG_DIR/env.local, outside the repository.
+#
+# Nothing is active. Add lines below.
+
+# DOCKER_HOST
+# -AWS_*

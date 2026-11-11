@@ -1,0 +1,18 @@
+#!/bin/sh
+# cura commit-msg hook for the doc governance system.
+# Versioned + shared: activate per clone with `git config core.hooksPath .cura/hooks`.
+#
+# This is a thin shim. The hook body lives in `cura hook commit-msg`, which
+# gates the staged change on content loss: a heading or derived-from entry this
+# commit drops that lands in no other governed doc. It runs here rather than in
+# pre-commit because the discharge is a `Dropped:` trailer in the message, and
+# the message does not exist until now. Bypass deliberately with --no-verify.
+
+# Bootstrap guard: cura cannot check for its own absence. Without this a
+# missing cura would exit 127 and block the commit; a graceful skip is wanted.
+if ! command -v cura >/dev/null 2>&1; then
+	echo "commit-msg: cura not on PATH - skipping doc checks (go install cura)"
+	exit 0
+fi
+
+exec cura hook commit-msg "$1"

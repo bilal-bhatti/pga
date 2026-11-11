@@ -1,0 +1,12 @@
+[package]
+name = "pga"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+native-tls = "0.2"
+postgres = "0.19"
+postgres-native-tls = "0.5"
+postgres-protocol = "0.6"
+ratatui = "0.30"
