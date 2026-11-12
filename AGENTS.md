@@ -24,7 +24,7 @@ Rust terminal UI (ratatui, sync `postgres` crate) for browsing and managing Post
 | Module | Owns |
 |---|---|
 | `src/main.rs` | CLI args, password prompt, terminal setup, event loop |
-| `src/conn.rs` | libpq-style defaults (`PG*` env, socket probe, `~/.pgpass`, `sslmode`), per-database client cache |
+| `src/conn.rs` | libpq-style defaults (`PG*` env, socket probe, `~/.pgpass`, `sslmode`), per-database client cache, DSN strings for `c` |
 | `src/catalog.rs` | every catalog query and its row type |
 | `src/wizard.rs` | multi-step flows that build the GRANT / REVOKE / ALTER / CREATE / DROP SQL |
 | `src/app.rs` | navigation path (`Level`, `Place`, `Tab`), lists, keys, running confirmed actions |
@@ -33,6 +33,8 @@ Rust terminal UI (ratatui, sync `postgres` crate) for browsing and managing Post
 ## Conventions
 
 - **Writes go through the confirm dialog.** A wizard builds an `Action`; the user sees the exact SQL; `App::execute` runs it in one transaction. No key runs SQL directly.
+  - `Action::outside_transaction` runs each statement on its own, for SQL PostgreSQL refuses in a transaction block (`CREATE DATABASE`).
+  - `Action::followed_by` starts another flow after a successful execute (create role, then its access).
 - **Identifiers:** quote with `catalog::quote_ident` (keyword list from `pg_get_keywords`). Never interpolate a raw name.
 - **Version gates** read `Server.version_num`: `>= 160000` for per-membership `INHERIT` / `SET` / `ADMIN`, `>= 170000` for `MAINTAIN`. Keep the pre-16 fallbacks.
 - **Passwords** go out as a SCRAM verifier built client side (`wizard::scram_literal`), never as plain text.

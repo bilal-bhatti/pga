@@ -84,6 +84,17 @@ fn notes(tab: Tab) -> &'static [&'static str] {
              bypass it.",
             "RLS applies after table privileges: a role still needs SELECT etc. on the table.",
         ],
+        Tab::Extensions => &[
+            "An extension packages types, functions and operators (pg_trgm, pgcrypto, PostGIS, pgvector). \
+             CREATE EXTENSION installs it into one database; each database needs its own. MySQL plugins are \
+             server-wide and have no per-database equivalent.",
+            "Only extensions whose files are installed on the server are listed (pg_available_extensions). Dim \
+             rows are not installed in this database.",
+            "Trusted extensions can be installed by any role with CREATE on the database; the extension is owned \
+             by that role, its objects by the bootstrap superuser. Untrusted ones need a superuser.",
+            "Using one needs USAGE on its schema. Its functions are executable by PUBLIC unless its script revokes \
+             that; tables it ships need grants like any table.",
+        ],
         Tab::Settings => &[
             "ALTER ROLE r SET p = v, ALTER DATABASE d SET p = v and ALTER ROLE r IN DATABASE d SET p = v store \
              session defaults (search_path, statement_timeout, ...). They apply when a session starts.",
@@ -114,6 +125,7 @@ fn queries(tab: Tab, v: i32) -> Vec<String> {
         Tab::Rls => vec![RLS_SQL.into(), POLICIES_SQL.into()],
         Tab::Settings => vec![SETTINGS_SQL.into()],
         Tab::Access => vec![reach_sql(v).into(), access_sql(v)],
+        Tab::Extensions => vec![EXTENSIONS_SQL.into()],
     }
 }
 

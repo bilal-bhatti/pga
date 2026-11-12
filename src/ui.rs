@@ -9,7 +9,7 @@ use crate::wizard::{Action, Step, StepKind};
 use crate::{detail, explain};
 
 const GLOBAL_KEYS: &str =
-    "Esc back  Tab view  r roles  d databases  / filter  ? explain  s system  b database  J/K scroll  ^r reload  q quit";
+    "Esc back  Tab view  r roles  d databases  / filter  ? explain  s system  b database  c copy DSN  J/K scroll  ^r reload  q quit";
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [head, _, path, _, tabs, body, foot] = Layout::vertical([
@@ -85,8 +85,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match &app.mode {
         Mode::Wizard(w) => draw_step(f, &w.step),
-        Mode::Confirm(a) => draw_confirm(f, a, &app.db),
-        Mode::Message { title, text, error } => draw_message(f, title, text, *error),
+        Mode::Confirm(a, scroll) => draw_confirm(f, a, *scroll, &app.db),
+        Mode::Message { title, text, error, wide } => draw_message(f, title, text, *error, *wide),
         _ => {}
     }
 }
@@ -184,25 +184,27 @@ fn draw_step(f: &mut Frame, step: &Step) {
     f.render_widget(Line::from(Span::styled(help, Style::new().dark_gray())), foot);
 }
 
-fn draw_confirm(f: &mut Frame, a: &Action, current: &str) {
-    let inner = popup(f, "Confirm", Color::Yellow, 70, 50);
+fn draw_confirm(f: &mut Frame, a: &Action, scroll: u16, current: &str) {
+    let inner = popup(f, "Confirm", Color::Yellow, 70, 80);
     let db = a.db.as_deref().unwrap_or(current);
-    let mut lines = vec![Line::from(format!("Run in database {db}:")), Line::default()];
+    let mut lines = vec![Line::from(format!("Run in database {db}:"))];
+    // The note goes first so a long statement list cannot push it out of view.
+    if let Some(n) = &a.note {
+        lines.push(Line::from(Span::styled(n.clone(), Style::new().yellow())));
+    }
+    lines.push(Line::default());
     for s in &a.display {
         lines.push(Line::from(Span::styled(format!("{s};"), Style::new().cyan().bold())));
     }
-    if let Some(n) = &a.note {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(n.clone(), Style::new().yellow())));
-    }
     let [body, foot] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
-    f.render_widget(Line::from(Span::styled("y run   n/Esc cancel", Style::new().bold())), foot);
+    let help = if lines.len() > body.height as usize { "y run   n/Esc cancel   j/k scroll" } else { "y run   n/Esc cancel" };
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)), body);
+    f.render_widget(Line::from(Span::styled(help, Style::new().bold())), foot);
 }
 
-fn draw_message(f: &mut Frame, title: &str, text: &str, error: bool) {
+fn draw_message(f: &mut Frame, title: &str, text: &str, error: bool, wide: bool) {
     let color = if error { Color::Red } else { Color::Yellow };
-    let inner = popup(f, title, color, 60, 40);
+    let inner = popup(f, title, color, if wide { 96 } else { 60 }, 40);
     let [body, foot] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     f.render_widget(Paragraph::new(text.to_string()).wrap(Wrap { trim: false }), body);
     f.render_widget(Line::from(Span::styled("any key to close", Style::new().dark_gray())), foot);

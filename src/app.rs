@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Constraint::{self, Fill, Length};
@@ -19,6 +21,7 @@ pub enum Tab {
     Objects,
     Defaults,
     Rls,
+    Extensions,
 }
 
 impl Tab {
@@ -33,6 +36,7 @@ impl Tab {
             Tab::Objects => "Objects",
             Tab::Defaults => "Default privs",
             Tab::Rls => "RLS",
+            Tab::Extensions => "Extensions",
         }
     }
 }
@@ -52,7 +56,7 @@ impl Level {
         match self {
             Level::Server => &[Tab::Roles, Tab::Databases, Tab::Settings],
             Level::Role(_) => &[Tab::Access, Tab::Memberships, Tab::Settings],
-            Level::Database(_) => &[Tab::Schemas, Tab::Objects, Tab::Defaults, Tab::Rls, Tab::Settings],
+            Level::Database(_) => &[Tab::Schemas, Tab::Objects, Tab::Defaults, Tab::Rls, Tab::Settings, Tab::Extensions],
             Level::Schema(_) => &[Tab::Objects, Tab::Defaults, Tab::Rls],
         }
     }
@@ -82,8 +86,10 @@ pub enum Mode {
     Normal,
     Filter,
     Wizard(Box<Wizard>),
-    Confirm(Action),
-    Message { title: String, text: String, error: bool },
+    /// The action and how far its SQL is scrolled.
+    Confirm(Action, u16),
+    /// `wide` spans the terminal, for text that must stay on one line (a DSN).
+    Message { title: String, text: String, error: bool, wide: bool },
 }
 
 pub struct ListRow {
@@ -203,7 +209,9 @@ impl App {
     pub fn keys(&self) -> &'static str {
         match (&self.place().level, self.tab()) {
             (Level::Server, Tab::Roles) => "⏎ open  n new  e attributes  p password  m join role  x leave role  D drop",
-            (Level::Server, Tab::Databases) | (_, Tab::Schemas) => "⏎ open  g grant  x revoke  o owner",
+            (Level::Server, Tab::Databases) => "⏎ open  n new  g grant  x revoke  o owner",
+            (_, Tab::Schemas) => "⏎ open  g grant  x revoke  o owner",
+            (_, Tab::Extensions) => "n install",
             (_, Tab::Objects) => "g grant  x revoke  o owner",
             (_, Tab::Defaults) => "g add rule  x revoke",
             (Level::Role(_), Tab::Access) => {
@@ -260,8 +268,27 @@ impl App {
         }
     }
 
+    /// DropRole flow with the role's dependencies in every database that has some.
+    fn drop_role(&mut self, role: Role) -> Option<Flow> {
+        let deps = (|| -> Result<Vec<catalog::RoleDep>> {
+            let c = self.conn.client(&self.db)?;
+            let mut deps = catalog::role_deps(c, role.oid, &self.db, true)?;
+            for db in catalog::role_dep_dbs(c, role.oid)? {
+                deps.extend(catalog::role_deps(self.conn.client(&db)?, role.oid, &db, false)?);
+            }
+            Ok(deps)
+        })();
+        match deps {
+            Ok(deps) => Some(Flow::DropRole { role, deps }),
+            Err(e) => {
+                self.fail(&format!("Reading what depends on {}", role.name), &e);
+                None
+            }
+        }
+    }
+
     fn fail(&mut self, title: &str, e: &anyhow::Error) {
-        self.mode = Mode::Message { title: title.into(), text: conn::describe(e), error: true };
+        self.mode = Mode::Message { title: title.into(), text: conn::describe(e), error: true, wide: false };
     }
 
     fn ctx(&self) -> Ctx<'_> {
@@ -270,6 +297,9 @@ impl App {
             members: &self.shared.members,
             schemas: &self.local.schemas,
             dbs: &self.shared.dbs,
+            extensions: &self.local.extensions,
+            db: &self.db,
+            conn: &self.conn,
             v: self.server.version_num,
             user: &self.server.user,
             keywords: &self.server.keywords,
@@ -482,6 +512,33 @@ impl App {
                     })
                     .collect(),
             ),
+            Tab::Extensions => (
+                vec!["Extension", "Version", "Schema", "Owner", "Install needs"],
+                vec![Fill(3), Length(16), Fill(2), Fill(2), Length(13)],
+                self.local
+                    .extensions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        let version = match (&e.installed, &e.default_version) {
+                            (Some(v), Some(d)) if v != d => format!("{v} → {d}"),
+                            (Some(v), _) => v.clone(),
+                            (None, d) => d.clone().unwrap_or_default(),
+                        };
+                        row(
+                            vec![
+                                e.name.clone(),
+                                version,
+                                e.schema.clone().unwrap_or_default(),
+                                e.owner.clone().unwrap_or_default(),
+                                e.needs().into(),
+                            ],
+                            (i, 0),
+                            e.installed.is_none(),
+                        )
+                    })
+                    .collect(),
+            ),
             Tab::Access => {
                 let mut rows = Vec::new();
                 if let Some(a) = &self.access {
@@ -529,6 +586,20 @@ impl App {
             return None;
         }
         self.selected().map(|(i, _)| self.shared.roles[i].clone())
+    }
+
+    /// Copy-DSN defaults: the role and schema in view, else the connected role and none.
+    fn dsn_flow(&self) -> Flow {
+        let role = self.selected_role().filter(|r| r.login).map_or_else(|| self.server.user.clone(), |r| r.name);
+        let selected = self.selected();
+        let schema = match (self.scope_schema(), self.tab(), selected) {
+            (Some(s), _, _) => Some(s.to_string()),
+            (_, Tab::Schemas, Some((i, _))) => Some(self.local.schemas[i].name.clone()),
+            (_, Tab::Objects, Some((i, _))) => Some(self.local.objects[i].schema.clone()),
+            (_, Tab::Access, Some((1, j))) => self.access.as_ref().and_then(|a| a.items[j].schema.clone()),
+            _ => None,
+        };
+        Flow::Dsn { role, schema: schema.unwrap_or_default() }
     }
 
     fn target(&self) -> Option<Target> {
@@ -583,7 +654,7 @@ impl App {
             }
             Mode::Filter => self.key_filter(key),
             Mode::Wizard(w) => self.key_wizard(w, key),
-            Mode::Confirm(a) => self.key_confirm(a, key),
+            Mode::Confirm(a, scroll) => self.key_confirm(a, scroll, key),
             Mode::Message { .. } => {}
         }
     }
@@ -672,6 +743,7 @@ impl App {
             }
             KeyCode::Char('s') => self.show_system = !self.show_system,
             KeyCode::Char('b') => self.drive(Flow::UseDb, Vec::new()),
+            KeyCode::Char('c') => self.drive(self.dsn_flow(), Vec::new()),
             KeyCode::Char(c) => self.action(c),
             _ => {}
         }
@@ -743,12 +815,24 @@ impl App {
         self.mode = Mode::Wizard(w);
     }
 
-    fn key_confirm(&mut self, action: Action, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('y') => self.execute(action),
-            KeyCode::Char('n') | KeyCode::Esc => self.status = Some(("cancelled".into(), false)),
-            _ => self.mode = Mode::Confirm(action),
-        }
+    fn key_confirm(&mut self, action: Action, scroll: u16, key: KeyEvent) {
+        let last = action.display.len() as u16;
+        let scroll = match key.code {
+            KeyCode::Char('y') => {
+                self.execute(action);
+                return;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.status = Some(("cancelled".into(), false));
+                return;
+            }
+            KeyCode::Down | KeyCode::Char('j') => scroll.saturating_add(1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => scroll.saturating_sub(1),
+            KeyCode::PageDown => scroll.saturating_add(10).min(last),
+            KeyCode::PageUp => scroll.saturating_sub(10),
+            _ => scroll,
+        };
+        self.mode = Mode::Confirm(action, scroll);
     }
 
     /// Advances a flow until it needs input or finishes.
@@ -774,10 +858,20 @@ impl App {
 
     fn outcome(&mut self, o: Outcome) {
         match o {
-            Outcome::Run(a) => self.mode = Mode::Confirm(a),
+            Outcome::Run(a) => self.mode = Mode::Confirm(a, 0),
             Outcome::UseDb(db) => {
                 self.use_db(db);
             }
+            Outcome::Copy(text) => {
+                let how = match osc52(&text) {
+                    Ok(()) => "Sent to the clipboard with OSC 52. Terminals without OSC 52 (e.g. Terminal.app) ignore \
+                               it; tmux passes it on with set-clipboard on.",
+                    Err(_) => "Writing to the terminal failed; copy it from here.",
+                };
+                let text = format!("{text}\n\n{how} No password is included.");
+                self.mode = Mode::Message { title: "DSN".into(), text, error: false, wide: true };
+            }
+            Outcome::Blocked { title, text } => self.mode = Mode::Message { title, text, error: true, wide: false },
         }
     }
 
@@ -843,11 +937,13 @@ impl App {
         let roles = tab == Tab::Roles || matches!(self.place().level, Level::Role(_));
         let flow = match (tab, c) {
             (Tab::Roles, 'n') => Some(Flow::CreateRole),
+            (Tab::Databases, 'n') => Some(Flow::CreateDb),
+            (Tab::Extensions, 'n') => Some(Flow::CreateExtension { db: self.db.clone() }),
             (_, 'e') if roles => self.selected_role().map(Flow::EditRole),
             (_, 'p') if roles => self.selected_role().map(Flow::Password),
             (_, 'm') if roles => self.selected_role().map(Flow::Join),
             (_, 'x') if roles => self.selected_role().map(Flow::Leave),
-            (_, 'D') if roles => self.selected_role().map(Flow::DropRole),
+            (_, 'D') if roles => self.selected_role().and_then(|r| self.drop_role(r)),
             (Tab::Databases | Tab::Schemas | Tab::Objects, 'g') => self.target().map(Flow::Grant),
             (Tab::Databases | Tab::Schemas | Tab::Objects, 'x') => self.target().map(Flow::Revoke),
             (Tab::Databases | Tab::Schemas | Tab::Objects, 'o') => self.target().map(Flow::Owner),
@@ -864,11 +960,19 @@ impl App {
         }
     }
 
-    /// Runs the statements in one transaction, then reloads everything.
+    /// Runs the statements in one transaction unless the action opts out, reloads
+    /// everything, then starts the action's follow-up flow.
     fn execute(&mut self, action: Action) {
         let db = action.db.clone().unwrap_or_else(|| self.db.clone());
         let result = (|| -> Result<()> {
-            let mut tx = self.conn.client(&db)?.transaction()?;
+            let client = self.conn.client(&db)?;
+            if !action.transaction {
+                for stmt in &action.exec {
+                    client.batch_execute(stmt)?;
+                }
+                return Ok(());
+            }
+            let mut tx = client.transaction()?;
             for stmt in &action.exec {
                 tx.batch_execute(stmt)?;
             }
@@ -877,21 +981,65 @@ impl App {
         })();
         let notices = self.conn.take_notices();
         let reloaded = self.reload();
+        let ok = result.is_ok();
         match result {
             Err(e) => {
                 let mut text = conn::describe(&e);
                 for n in &notices {
                     text.push_str(&format!("\n{n}"));
                 }
-                self.mode = Mode::Message { title: "Statement failed, nothing changed".into(), text, error: true };
+                self.mode = Mode::Message { title: "Statement failed, nothing changed".into(), text, error: true, wide: false };
             }
-            Ok(()) if !notices.is_empty() => {
-                self.mode = Mode::Message { title: "Done, with notices".into(), text: notices.join("\n"), error: false };
+            Ok(()) if !notices.is_empty() && action.then.is_none() => {
+                self.mode = Mode::Message { title: "Done, with notices".into(), text: notices.join("\n"), error: false, wide: false };
             }
-            Ok(()) => self.status = Some((format!("done: {}", action.display.join("; ")), false)),
+            Ok(()) => {
+                let mut msg = format!("done: {}", action.display.join("; "));
+                for n in &notices {
+                    msg.push_str(&format!("  {n}"));
+                }
+                self.status = Some((msg, false));
+            }
         }
         if let Err(e) = reloaded {
             self.fail("Reload failed", &e);
+            return;
         }
+        if ok && let Some(flow) = action.then {
+            self.drive(*flow, Vec::new());
+        }
+    }
+}
+
+/// Puts `text` on the clipboard through the terminal (OSC 52).
+fn osc52(text: &str) -> std::io::Result<()> {
+    let mut out = std::io::stdout();
+    write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()))?;
+    out.flush()
+}
+
+fn base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64;
+
+    #[test]
+    fn base64_pads() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
     }
 }

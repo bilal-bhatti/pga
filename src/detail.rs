@@ -66,6 +66,7 @@ pub fn lines(app: &App) -> Lines {
         (Tab::Defaults, Some((i, j))) => default_acl(app, i, j, &mut out),
         (Tab::Rls, Some((i, _))) => rls(app, i, &mut out),
         (Tab::Settings, Some((i, _))) => setting(app, i, &mut out),
+        (Tab::Extensions, Some((i, _))) => extension(app, i, &mut out),
     }
     out
 }
@@ -288,6 +289,45 @@ fn setting(app: &App, i: usize, out: &mut Lines) {
         (true, true) => "ALTER ROLE ALL SET ...".into(),
     };
     kv(out, "set by", sql);
+}
+
+fn extension(app: &App, i: usize, out: &mut Lines) {
+    let e = &app.local.extensions[i];
+    head(out, format!("Extension {}", e.name));
+    if !e.comment.is_empty() {
+        note(out, e.comment.clone());
+    }
+    kv(out, "installed", e.installed.clone().unwrap_or_else(|| "no".into()));
+    if let Some(s) = &e.schema {
+        kv(out, "schema", s.clone());
+    }
+    if let Some(o) = &e.owner {
+        kv(out, "owner", o.clone());
+    }
+    if let Some(d) = &e.default_version {
+        kv(out, "default version", d.clone());
+    }
+    kv(out, "trusted", yes(e.trusted));
+    kv(out, "relocatable", yes(e.relocatable));
+    if !e.requires.is_empty() {
+        kv(out, "requires", e.requires.join(", "));
+    }
+    head(out, "Who may install it");
+    if e.trusted {
+        item(out, format!("A role with CREATE on database {}.", app.db));
+        note(out, "Trusted: its objects are owned by the bootstrap superuser.");
+    } else if e.superuser {
+        item(out, "A superuser.");
+    } else {
+        item(out, "A role with the privileges to create its objects.");
+    }
+    if let Some(s) = &e.schema {
+        head(out, "Using it");
+        item(out, format!("Roles need USAGE on schema {s}."));
+        note(out, "Its functions are executable by PUBLIC unless its script revokes that; Objects shows their grants.");
+    }
+    head(out, "Keys");
+    note(out, format!("n installs an extension into {}", app.db));
 }
 
 fn access(app: &App, sel: Option<(usize, usize)>, out: &mut Lines) {

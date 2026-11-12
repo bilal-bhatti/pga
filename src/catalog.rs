@@ -572,12 +572,54 @@ select p.polrelid, p.polname::text, p.polpermissive,
 from pg_policy p
 order by 1, 2";
 
+/// An installed extension, or one whose files are on the server.
+#[derive(Clone, Debug)]
+pub struct Extension {
+    pub name: String,
+    /// None: not installed in this database.
+    pub installed: Option<String>,
+    pub default_version: Option<String>,
+    pub schema: Option<String>,
+    pub owner: Option<String>,
+    pub trusted: bool,
+    pub superuser: bool,
+    pub relocatable: bool,
+    pub requires: Vec<String>,
+    pub comment: String,
+}
+
+impl Extension {
+    /// What CREATE EXTENSION needs. `superuser` is also set on trusted extensions.
+    pub fn needs(&self) -> &'static str {
+        if self.trusted {
+            "CREATE on db"
+        } else if self.superuser {
+            "superuser"
+        } else {
+            "its objects"
+        }
+    }
+}
+
+pub const EXTENSIONS_SQL: &str = "\
+select coalesce(e.extname, a.name)::text, e.extversion::text, a.default_version::text,
+       n.nspname::text, pg_get_userbyid(e.extowner)::text,
+       coalesce(v.trusted, false), coalesce(v.superuser, true), coalesce(v.relocatable, e.extrelocatable, false),
+       coalesce(v.requires::text[], '{}'), coalesce(a.comment, '')
+from pg_extension e
+full join pg_available_extensions a on a.name = e.extname
+left join pg_namespace n on n.oid = e.extnamespace
+left join pg_available_extension_versions v
+  on v.name = coalesce(e.extname, a.name) and v.version = coalesce(e.extversion, a.default_version)
+order by e.extname is null, 1";
+
 #[derive(Default)]
 pub struct Local {
     pub schemas: Vec<Schema>,
     pub objects: Vec<Object>,
     pub defacls: Vec<DefAcl>,
     pub rls: Vec<RlsTable>,
+    pub extensions: Vec<Extension>,
 }
 
 pub fn load_local(c: &mut Client) -> Result<Local> {
@@ -678,7 +720,24 @@ pub fn load_local(c: &mut Client) -> Result<Local> {
         })
         .collect();
 
-    Ok(Local { schemas, objects, defacls, rls })
+    let extensions = c
+        .query(EXTENSIONS_SQL, &[])?
+        .iter()
+        .map(|r| Extension {
+            name: r.get(0),
+            installed: r.get(1),
+            default_version: r.get(2),
+            schema: r.get(3),
+            owner: r.get(4),
+            trusted: r.get(5),
+            superuser: r.get(6),
+            relocatable: r.get(7),
+            requires: r.get(8),
+            comment: r.get(9),
+        })
+        .collect();
+
+    Ok(Local { schemas, objects, defacls, rls, extensions })
 }
 
 // ---- effective access of one role ----
@@ -841,4 +900,70 @@ pub fn load_access(c: &mut Client, v: i32, role: &Role, db: &str) -> Result<Acce
     };
     items.sort_by(|a, b| (rank(&a.kind), &a.schema, &a.name).cmp(&(rank(&b.kind), &b.schema, &b.name)));
     Ok(Access { role: role.clone(), db: db.to_string(), reach, items })
+}
+
+// ---- what keeps a role from being dropped ----
+
+/// One pg_shdepend entry of a role.
+#[derive(Clone, Debug)]
+pub struct RoleDep {
+    /// Database the object is in; empty for cluster-wide objects (databases, tablespaces, parameters).
+    pub db: String,
+    /// 'a' privilege, 'o' owner, 'r' policy target, 'i' initial privilege of an extension.
+    pub deptype: String,
+    /// pg_identify_object type, e.g. "table", "table column", "default acl".
+    pub kind: String,
+    /// Quoted by the server. For a column, its table.
+    pub ident: String,
+    pub column: Option<String>,
+    /// For "default acl": quoted creator, quoted schema (None for all schemas), defaclobjtype.
+    pub defacl: Option<(String, Option<String>, String)>,
+    /// pg_describe_object.
+    pub what: String,
+}
+
+const ROLE_DEP_DBS_SQL: &str = "\
+select distinct d.datname::text
+from pg_shdepend s join pg_database d on d.oid = s.dbid
+where s.refclassid = 'pg_authid'::regclass and s.refobjid = $1 and d.datname <> current_database()
+order by 1";
+
+/// Entries in the current database, and cluster-wide ones when $2.
+const ROLE_DEPS_SQL: &str = "\
+select s.deptype::text, o.type, case when s.objsubid <> 0 then t.identity else o.identity end,
+       case when s.objsubid <> 0 and s.classid = 'pg_class'::regclass
+            then (select quote_ident(attname) from pg_attribute where attrelid = s.objid and attnum = s.objsubid) end,
+       quote_ident(pg_get_userbyid(a.defaclrole)), nullif(a.defaclnamespace, 0)::regnamespace::text,
+       a.defaclobjtype::text, pg_describe_object(s.classid, s.objid, s.objsubid), s.dbid = 0
+from pg_shdepend s
+cross join lateral pg_identify_object(s.classid, s.objid, s.objsubid) o
+cross join lateral pg_identify_object(s.classid, s.objid, 0) t
+left join pg_default_acl a on s.classid = 'pg_default_acl'::regclass and a.oid = s.objid
+where s.refclassid = 'pg_authid'::regclass and s.refobjid = $1
+  and (s.dbid = (select oid from pg_database where datname = current_database()) or (s.dbid = 0 and $2))
+order by s.dbid <> 0, 8";
+
+/// Databases other than the connected one with entries for `role`. Naming those entries needs a
+/// connection to each.
+pub fn role_dep_dbs(c: &mut Client, role: u32) -> Result<Vec<String>> {
+    Ok(c.query(ROLE_DEP_DBS_SQL, &[&role])?.iter().map(|r| r.get(0)).collect())
+}
+
+/// Entries of `role` in `db`, the database `c` is connected to.
+pub fn role_deps(c: &mut Client, role: u32, db: &str, shared: bool) -> Result<Vec<RoleDep>> {
+    Ok(c.query(ROLE_DEPS_SQL, &[&role, &shared])?
+        .iter()
+        .map(|r| {
+            let creator: Option<String> = r.get(4);
+            RoleDep {
+                db: if r.get(8) { String::new() } else { db.to_string() },
+                deptype: r.get(0),
+                kind: r.get(1),
+                ident: r.get(2),
+                column: r.get(3),
+                defacl: creator.map(|c| (c, r.get(5), r.get::<_, Option<String>>(6).unwrap_or_default())),
+                what: r.get(7),
+            }
+        })
+        .collect())
 }

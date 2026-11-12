@@ -147,6 +147,66 @@ impl Conn {
     pub fn take_notices(&self) -> Vec<String> {
         std::mem::take(&mut *self.notices.lock().unwrap())
     }
+
+    /// Connection string for `user` on `db` at this server, without a password: a
+    /// libpq URL, or keyword=value pairs. `search_path` goes into libpq `options`.
+    pub fn dsn(&self, user: &str, db: &str, search_path: Option<&str>, url: bool) -> String {
+        let port = self.base.get_ports().first().copied().unwrap_or(5432);
+        let host = match self.base.get_hosts().first() {
+            Some(Host::Tcp(h)) => h.clone(),
+            Some(Host::Unix(p)) => p.display().to_string(),
+            None => "localhost".into(),
+        };
+        let ssl = match self.base.get_ssl_mode() {
+            SslMode::Disable => Some("disable"),
+            SslMode::Require => Some("require"),
+            _ => None,
+        };
+        // libpq splits options on spaces; a backslash escapes the next character.
+        let options = search_path.map(|p| format!("-csearch_path={}", p.replace('\\', r"\\").replace(' ', r"\ ")));
+        if !url {
+            let mut pairs = vec![("host", host), ("port", port.to_string()), ("user", user.into()), ("dbname", db.into())];
+            pairs.extend(options.map(|o| ("options", o)));
+            pairs.extend(ssl.map(|s| ("sslmode", s.into())));
+            return pairs.iter().map(|(k, v)| format!("{k}={}", conninfo_value(v))).collect::<Vec<_>>().join(" ");
+        }
+        let mut query = Vec::new();
+        let authority = if host.starts_with('/') {
+            // In the query rather than as a percent-encoded host, which Go's net/url rejects.
+            query.push(format!("host={}", pct(&host, "/")));
+            query.push(format!("port={port}"));
+            String::new()
+        } else if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        query.extend(options.map(|o| format!("options={}", pct(&o, ""))));
+        query.extend(ssl.map(|s| format!("sslmode={s}")));
+        let query = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+        format!("postgresql://{}@{authority}/{}{query}", pct(user, ""), pct(db, ""))
+    }
+}
+
+/// Percent-encodes all but RFC 3986 unreserved characters and `keep`.
+fn pct(s: &str, keep: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) || keep.as_bytes().contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// A conninfo value, single-quoted when it is empty or has a space, quote or backslash.
+fn conninfo_value(v: &str) -> String {
+    if !v.is_empty() && !v.contains([' ', '\'', '\\']) {
+        return v.to_string();
+    }
+    format!("'{}'", v.replace('\\', r"\\").replace('\'', r"\'"))
 }
 
 fn connect(base: &Config, db: &str) -> Result<Client> {
@@ -230,11 +290,55 @@ pub fn describe(e: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::split_pgpass;
+    use postgres::Config;
+    use postgres::config::SslMode;
+
+    use super::{Conn, split_pgpass};
 
     #[test]
     fn pgpass_fields() {
         assert_eq!(split_pgpass("h:5432:*:u:p:w"), ["h", "5432", "*", "u", "p:w"]);
         assert_eq!(split_pgpass(r"h\:x:1:d:u:p\\"), ["h:x", "1", "d", "u", r"p\"]);
+    }
+
+    fn conn(host: &str, ssl: SslMode) -> Conn {
+        let mut cfg = Config::new();
+        cfg.host(host).port(5432).ssl_mode(ssl);
+        Conn::new(cfg)
+    }
+
+    #[test]
+    fn dsn_over_tcp() {
+        let c = conn("db.example.com", SslMode::Require);
+        assert_eq!(
+            c.dsn("agent", "struts", Some("app,public"), true),
+            "postgresql://agent@db.example.com:5432/struts?options=-csearch_path%3Dapp%2Cpublic&sslmode=require"
+        );
+        assert_eq!(
+            c.dsn("agent", "struts", Some("app,public"), false),
+            "host=db.example.com port=5432 user=agent dbname=struts options=-csearch_path=app,public sslmode=require"
+        );
+        assert_eq!(conn("::1", SslMode::Prefer).dsn("a", "d", None, true), "postgresql://a@[::1]:5432/d");
+    }
+
+    #[test]
+    fn dsn_over_socket() {
+        let c = conn("/tmp", SslMode::Prefer);
+        assert_eq!(c.dsn("agent", "struts", None, true), "postgresql://agent@/struts?host=/tmp&port=5432");
+        assert_eq!(c.dsn("agent", "struts", None, false), "host=/tmp port=5432 user=agent dbname=struts");
+    }
+
+    #[test]
+    fn dsn_escapes() {
+        let c = conn("/tmp", SslMode::Prefer);
+        let path = Some(r#""My App",public"#);
+        assert_eq!(
+            c.dsn("o'brien", "my db", path, false),
+            r#"host=/tmp port=5432 user='o\'brien' dbname='my db' options='-csearch_path="My\\ App",public'"#
+        );
+        assert_eq!(
+            c.dsn("o'brien", "my db", path, true),
+            "postgresql://o%27brien@/my%20db?host=/tmp&port=5432&options=-csearch_path%3D%22My%5C%20App%22%2Cpublic"
+        );
     }
 }
