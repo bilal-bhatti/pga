@@ -127,11 +127,18 @@ pub struct Step {
     pub cursor: usize,
     /// Filter text for Pick, the value for Input.
     pub text: String,
+    /// Multi: Enter needs one of the first `need` options ticked.
+    pub need: usize,
 }
 
 impl Step {
     fn new(title: impl Into<String>, kind: StepKind, opts: Vec<Opt>, checked: Vec<bool>) -> Step {
-        Step { title: title.into(), hint: None, kind, opts, checked, cursor: 0, text: String::new() }
+        Step { title: title.into(), hint: None, kind, opts, checked, cursor: 0, text: String::new(), need: 0 }
+    }
+
+    fn needs_one_of(mut self, n: usize) -> Step {
+        self.need = n;
+        self
     }
 
     fn hint(mut self, hint: impl Into<String>) -> Step {
@@ -150,8 +157,10 @@ impl Step {
         }
     }
 
+    /// None when Enter has nothing to submit.
     pub fn answer(&self) -> Option<Vec<String>> {
         match self.kind {
+            StepKind::Multi if self.need > 0 && !self.checked[..self.need].contains(&true) => None,
             StepKind::Pick => self.visible().get(self.cursor).map(|&i| vec![self.opts[i].value.clone()]),
             StepKind::Multi => Some(
                 self.opts.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(o, _)| o.value.clone()).collect(),
@@ -367,7 +376,8 @@ impl Flow {
                 0 => pick(format!("GRANT on {} {}: to which role?", t.what.to_lowercase(), t.label), role_opts(ctx, true, None)),
                 1 => {
                     let (opts, checked) = priv_opts(&t.privs, true);
-                    Next::Ask(multi(format!("GRANT ... ON {} {} TO {}: which privileges?", t.what, t.label, one(0)), opts, checked))
+                    let title = format!("GRANT ... ON {} {} TO {}: which privileges?", t.what, t.label, one(0));
+                    Next::Ask(multi(title, opts, checked).needs_one_of(t.privs.len()))
                 }
                 _ => {
                     let (privs, go) = split_option(&a[1], GRANT_OPTION);
@@ -400,7 +410,8 @@ impl Flow {
                         opts.push(opt("GRANT OPTION FOR  (keep the privileges, remove only the grant option)", GRANT_OPTION_FOR));
                         opts.push(opt("CASCADE  (also revoke what the grantee granted on)", CASCADE));
                         checked.extend([false, false]);
-                        Next::Ask(multi(format!("REVOKE ... FROM {}: which privileges?", g.grantee), opts, checked))
+                        let title = format!("REVOKE ... FROM {}: which privileges?", g.grantee);
+                        Next::Ask(multi(title, opts, checked).needs_one_of(g.privs.len()))
                     }
                     _ => {
                         let g = &t.grants[one(0).parse::<usize>().unwrap_or_default()];
@@ -848,8 +859,9 @@ impl Flow {
                 }
                 3 => pick("Grant to which role?", role_opts(ctx, true, None)),
                 4 => {
-                    let (opts, checked) = priv_opts(&catalog::defacl_privs(&one(1), ctx.v), true);
-                    Next::Ask(multi("Which privileges?", opts, checked))
+                    let privs = catalog::defacl_privs(&one(1), ctx.v);
+                    let (opts, checked) = priv_opts(&privs, true);
+                    Next::Ask(multi("Which privileges?", opts, checked).needs_one_of(privs.len()))
                 }
                 _ => {
                     let (privs, go) = split_option(&a[4], GRANT_OPTION);
@@ -1148,6 +1160,26 @@ mod tests {
         let a = action(run(&flow, &f.ctx(170000), &[&[], &["agent"]]));
         assert_eq!(a.exec, ["DROP ROLE agent"]);
         assert!(a.note.is_none());
+    }
+
+    #[test]
+    fn privilege_step_refuses_empty_enter() {
+        let f = Fixture::new();
+        let flow = Flow::Revoke(Target {
+            what: "DATABASE",
+            alter: "DATABASE",
+            ident: "struts".into(),
+            label: "struts".into(),
+            db: None,
+            privs: catalog::DATABASE_PRIVS.to_vec(),
+            grants: f.dbs[1].grants.clone(),
+        });
+        let Next::Ask(mut step) = run(&flow, &f.ctx(170000), &[&["0"]]) else { panic!("no privilege step") };
+        assert_eq!(step.answer(), Some(vec!["TEMPORARY".to_string()]));
+        step.checked[0] = false;
+        assert_eq!(step.answer(), None);
+        step.checked[1] = true;
+        assert_eq!(step.answer(), None, "GRANT OPTION FOR alone revokes nothing");
     }
 
     #[test]

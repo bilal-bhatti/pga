@@ -774,19 +774,24 @@ impl App {
     }
 
     fn key_wizard(&mut self, mut w: Box<Wizard>, key: KeyEvent) {
+        self.status = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let step = &mut w.step;
         let last = step.visible().len().saturating_sub(1);
         match (&step.kind, key.code) {
             (_, KeyCode::Esc) => return,
             (_, KeyCode::Char('c')) if ctrl => return,
-            (_, KeyCode::Enter) => {
-                if let Some(answer) = step.answer() {
+            (_, KeyCode::Enter) => match step.answer() {
+                Some(answer) => {
                     w.answers.push(answer);
                     self.drive(w.flow, w.answers);
                     return;
                 }
-            }
+                None if matches!(step.kind, StepKind::Multi) => {
+                    self.status = Some(("nothing ticked: Space ticks the row under ›".into(), true));
+                }
+                None => {}
+            },
             (_, KeyCode::Up) => step.cursor = step.cursor.saturating_sub(1),
             (_, KeyCode::Char('p')) if ctrl => step.cursor = step.cursor.saturating_sub(1),
             (_, KeyCode::Down) => step.cursor = (step.cursor + 1).min(last),
